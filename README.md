@@ -6,7 +6,7 @@ A sophisticated Retrieval-Augmented Generation (RAG) system that leverages multi
 
 This project implements an agentic RAG pipeline using LangChain and LangGraph, where multiple specialized agents work together to process user queries and retrieve relevant information from Wikipedia:
 
-1. **Agent 1 — Query Rewrite**: Optimizes user queries for better Wikipedia retrieval
+1. **Agent 1 — Query Rewrite**: Optimizes user queries 
 2. **Agent 2 — Knowledge Update**: Identifies and retrieves additional Wikipedia articles as needed
 3. **Agent 3 — Multiple Retrieval**: Determines optimal document retrieval parameters
 4. **Generator**: Produces final answers based on retrieved documents
@@ -97,7 +97,7 @@ User Query
     ↓
 [Agent 2] Knowledge Base Update (adding more Wikipedia articles)
     ↓
-[Agent 3] Reasoning (determines retrieval parameters)
+[Agent 3] Multiple Retrieval (determines retrieval parameters)
     ↓
 [Generator] Final Answer Generation
     ↓
@@ -109,7 +109,7 @@ Chat Response with Citations
 
 ```
 .
-├── agent.py                 # Main agent definitions
+├── agent.py                # Main agent definitions
 ├── backend.py              # FastAPI server
 ├── app.py                  # Streamlit UI
 ├── requirements.txt        # Python dependencies
@@ -130,9 +130,9 @@ Chat Response with Citations
 |----------|--------|-------------|
 | `/agent1` | POST | Query rewriting agent |
 | `/agent2` | GET | Knowledge base update |
-| `/agent3` | GET | Document retrieval reasoning |
+| `/agent3` | GET | Multiple Retrieval Documents |
 | `/state` | GET | Get current agent state |
-| `/query` | GET | Generate final answer (streaming) |
+| `/query` | GET | Generate final answer |
 
 ## 📦 Dependencies
 
