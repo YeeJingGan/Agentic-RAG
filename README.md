@@ -8,10 +8,13 @@ This project implements an agentic RAG pipeline using LangChain and LangGraph, w
 
 1. **Agent 1 — Query Rewrite**: Optimizes user queries for better Wikipedia retrieval
 2. **Agent 2 — Knowledge Update**: Identifies and retrieves additional Wikipedia articles as needed
-3. **Agent 3 — Reasoning**: Determines optimal document retrieval parameters
+3. **Agent 3 — Multiple Retrieval**: Determines optimal document retrieval parameters
 4. **Generator**: Produces final answers based on retrieved documents
 
 ## 🏗️ Architecture
+
+### Workflow
+![Agentic RAG Workflow](images/Agentic%20RAG.png)
 
 ### Backend Components
 

@@ -51,7 +51,7 @@ class WikipediaProcessor:
                 if text["article_id"] not in db_article_ids:
                     article_metadatas.append(article_metadata)
                     article_texts.append(text)
-                    log.info(f"Fetched article '{title}' successfully.")
+                    log.info(f"Fetched article '{article_metadata['title']}' successfully.")
                 else:
                     log.info(f"Article '{title}' already exists in the database. Skipping.")
             except Exception as e:

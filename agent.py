@@ -124,8 +124,9 @@ query_rewrite_agent = create_agent(
     tools=[update_state],
     response_format=ToolStrategy(Reason),
     system_prompt="You are a Wikipedia Query Optimization Agent. Do not answer to the query, follow the instructions carefully. "
-    "1. Anyalse whether the user query is optimized to retrieve documents from Wikpedia articles. You may use context in the chat history to refine the query. "
-    "2. If user query is not optimized, you must use the update_state tool to update the all_time_state with the rewritten query "
+    "1. Comprehend the user query and the chat history. "
+    "2. Analyse whether the user query is optimized to retrieve documents from Wikpedia articles."
+    "3. If user query is not optimized, you must use the update_state tool to update the all_time_state with the rewritten query "
     'where key = "updated_query".',
 )
 
@@ -169,6 +170,10 @@ generator = create_agent(
 
 def query_rewrite_run() -> str:
     global all_time_state
+
+    if 'updated_query' in all_time_state:
+        all_time_state.pop('updated_query')
+
 
     result = query_rewrite_agent.invoke(
         {
