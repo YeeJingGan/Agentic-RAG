@@ -2,7 +2,6 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 from rag.chunker import Chunker
-from langchain.tools import tool
 from typing import List, Any
 from rag.retriever import Retriever
 from langgraph.runtime import Runtime
@@ -15,7 +14,7 @@ from langchain.agents import create_agent, AgentState
 from rag.wikipedia_processor import WikipediaProcessor
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langchain_google_genai import ChatGoogleGenerativeAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from langchain.agents.structured_output import ToolStrategy
 
 
@@ -47,6 +46,8 @@ wiki_processor = WikipediaProcessor(
 all_time_state = {
     "query": None,
     "chat_history": [],
+    "should_retrieve": True,
+    "final_k": 5,
 }
 
 # --------------------------------------------------------
@@ -68,20 +69,12 @@ def trim_messages(state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         return None  # No changes needed
 
     first_msg = messages[0]
-    recent_messages = messages[-3:] if len(messages) % 2 == 0 else messages[-4:]
+    recent_messages = messages[-8:]
     new_messages = [first_msg] + recent_messages
 
     return {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), *new_messages]}
 
 
-@tool(description="Update the all_time_state with the given key and value.")
-def update_state(key: str, value: str):
-    global all_time_state
-
-    all_time_state[key] = value
-
-
-@tool(description="Retrieve Wikipedia articles by their titles when the existing articles are not sufficient to answer the query. Titles should be distinct.")
 def wikipedia_tool(titles: List[str]):
     existing_articles = doc_store.get_all_articles()
     existing_titles = {article["title"] for article in existing_articles}
@@ -91,13 +84,8 @@ def wikipedia_tool(titles: List[str]):
     wiki_processor.process(titles=titles)
 
 
-@tool(description="Retrieve documents for a given query when the current documents do not contain any information about the query.")
 def retrieve_tool(query: str, k: int) -> List[str]:
-    _, _, _, parent_docs, articles = retriever.retrieve(
-        query=query, k=k
-    )
-    
-    all_time_state['retrieved_documents'] = parent_docs
+    _, _, _, parent_docs, articles = retriever.retrieve(query=query, k=k)
 
     return parent_docs
 
@@ -105,62 +93,105 @@ def retrieve_tool(query: str, k: int) -> List[str]:
 # --------------------------------------------------------
 # Define Structured Output Models
 # --------------------------------------------------------
-class Reason(BaseModel):
-    reason: str | None = Field(
-        ...,
-        description="The reason for executing the tool if tool is used else mention why not.",
-    )
+
+
+class RewriteDecision(BaseModel):
+    should_rewrite: bool
+    rewritten_query: str | None
+    reason: str
+
+
+class KnowledgeUpdateDecision(BaseModel):
+    should_update: bool
+    new_titles: List[str] | None
+    reason: str
+
+
+class MultipleRetrievalDecision(BaseModel):
+    should_retrieve: bool
+    reason: str
 
 
 # --------------------------------------------------------
 # Model and Agent Creation
 # ---------------------------------------------------------
 
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0)
+llm = ChatGoogleGenerativeAI(model=MODEL_ID, temperature=0)
 
 # Agent 1: Query Rewrite Agent
 query_rewrite_agent = create_agent(
     model=llm,
-    tools=[update_state],
-    response_format=ToolStrategy(Reason),
-    system_prompt="You are a Wikipedia Query Optimization Agent. Do not answer to the query, follow the instructions carefully. "
-    "1. Comprehend the user query and the chat history. "
-    "2. Analyse whether the user query is optimized to retrieve documents from Wikpedia articles."
-    "3. If user query is not optimized, you must use the update_state tool to update the all_time_state with the rewritten query "
-    'where key = "updated_query".',
+    response_format=ToolStrategy(RewriteDecision),
+    system_prompt=(
+        "You are a Query Optimization Agent.\n"
+        "Your task is to make the user's query clear and explicit for an LLM to answer.\n"
+        "Comprehend the user's query AND the chat history.\n"
+        "If the query is not clear or relies on context from previous conversation:\n"
+        "- set should_rewrite = true\n"
+        "- include relevant information from chat history to make the query self-contained\n"
+        "- provide rewritten_query\n"
+        "- provide reason for rewriting the query\n"
+        "Otherwise:\n"
+        "- set should_rewrite = false\n"
+        "- rewritten_query must be null\n"
+        "- provide reason for not rewriting the query\n"
+        "Rules:\n"
+        "1. Only include information from chat history that is necessary for clarity.\n"
+        "2. Do not assume facts not mentioned in chat history.\n"
+        "3. Keep the rewritten query concise but self-contained."
+    ),
 )
 
 # Agent 2: Knowledge Base Update Agent
 knowledge_update_agent = create_agent(
     model=llm,
-    tools=[wikipedia_tool, update_state],
-    response_format=ToolStrategy(Reason),
-    system_prompt='You are a Knowledge Base Update Agent. Do not answer to the query, follow the instructions carefully. ' \
-    '1. Analyse whether the existing articles provided are sufficient to answer the query. ' \
-    '2. When existing articles do not answer the query, you must use the wikipedia_tool to retrieve additional Wikipedia articles that are not in the existing articles.' \
-    '3. Use the update_state tool to update the all_time_state with key = "is_knowledge_updated" and value = "true" when wikipedia_tool is used else "false". ')
+    response_format=ToolStrategy(KnowledgeUpdateDecision),
+    system_prompt=(
+        "You are a Knowledge Base Update Agent.\n"
+        "Your task is to decide if new Wikipedia articles are needed to answer the user query.\n"
+        "Input: user query + existing articles (title + summary).\n"
+        "If the existing articles do NOT cover the query:\n"
+        "- set should_update = true\n"
+        "- provide new_titles = list of relevant Wikipedia article titles NOT in existing articles\n"
+        "- provide reason for update\n"
+        "Otherwise:\n"
+        "- set should_update = false\n"
+        "- new_titles = null\n"
+        "- provide reason for no update\n"
+        "Rules:\n"
+        "1. Only suggest real Wikipedia articles that exist online.\n"
+        "2. No duplicate titles.\n"
+        "3. Base decision on both titles and summaries of existing articles.\n"
+        "4. Maximum of 5 new titles if update is needed."
+    ),
+)
 
 # Agent 3: Document Retrieval Agent
 document_retrieve_agent = create_agent(
     model=llm,
-    tools=[retrieve_tool, update_state],
-    response_format=ToolStrategy(Reason),
-    system_prompt='You are a Document Retrieve Agent. Do not answer to the query, follow the instructions carefully. ' \
-    '1. Assess whether the current documents answer the query.' \
-    '2. If insufficient, loop at most 3 times for the following procedures: ' \
-    '   a. Use the `retrieve_tool` to get additional relevant documents.' \
-    '   b. Each time, use an integer value higher than 10 for \'k\' in the `retrieve_tool`. Over iterations, gradually increase \'k\' by at least 5 each time.'
-    '   c. Evaluate the newly retrieved documents.'
-    '   d. Stop if the documents sufficiently answer the query.' \
-    '3. Use the update_state tool to update the all_time_state with key = "k" and value = k used in retrieve_tool. ')
+    response_format=ToolStrategy(MultipleRetrievalDecision),
+    system_prompt=(
+        "You are a Document Retrieve Agent. Do NOT answer the user query yourself.\n"
+        "Input: user query + current documents.\n"
+        "Task: Decide if additional documents are needed.\n"
+        "If current documents are insufficient:\n"
+        "- set should_retrieve = true\n"
+        "- provide reason for retrieval\n"
+        "If documents are sufficient:\n"
+        "- set should_retrieve = false\n"
+        "- provide reason for no retrieval\n"
+        "Rules:\n"
+        "1. Only retrieve relevant documents.\n"
+    ),
+)
 
-# Generator 
+# Generator
 generator = create_agent(
     llm,
     middleware=[trim_messages],
     checkpointer=InMemorySaver(),
-    system_prompt="You are a factual assistant that generates answers based on retrieved Wikipedia articles." \
-    "When answering, cite the Wikipedia article titles with URLs in parentheses." \
+    system_prompt="You are a factual assistant that generates answers based on retrieved Wikipedia articles."
+    "When answering, cite the Wikipedia article titles with URLs in parentheses."
     "Keep your answers concise and to the point.",
 )
 
@@ -168,12 +199,19 @@ generator = create_agent(
 # Agent Run Function
 # --------------------------------------------------------
 
+
 def query_rewrite_run() -> str:
     global all_time_state
 
-    if 'updated_query' in all_time_state:
-        all_time_state.pop('updated_query')
+    print(all_time_state["chat_history"])
 
+    if "updated_query" in all_time_state:
+        all_time_state.pop("updated_query")
+    if "new_titles" in all_time_state:
+        all_time_state.pop("new_titles")
+
+    all_time_state["final_k"] = 5
+    all_time_state["should_retrieve"] = True
 
     result = query_rewrite_agent.invoke(
         {
@@ -183,13 +221,19 @@ def query_rewrite_run() -> str:
                     "content": "User Query: \n"
                     + all_time_state["query"]
                     + "\n\n Chat History: \n"
-                    + str(all_time_state["chat_history"])
+                    + str(all_time_state["chat_history"]),
                 }
             ]
         }
     )
 
-    reasoning = result['structured_response'].reason
+    reasoning = (
+        "Rewrite is "
+        + str(result["structured_response"].should_rewrite)
+        + ". "
+        + result["structured_response"].reason
+    )
+    all_time_state["updated_query"] = result["structured_response"].rewritten_query
 
     return reasoning
 
@@ -200,18 +244,47 @@ def knowledge_base_update_run() -> str:
     existing_articles = doc_store.get_all_articles()
 
     articles = [
+        {
+            "title": article["title"],
+            "summary": article["summary"][:300],
+        }
+        for article in existing_articles
+    ]
+
+    result = knowledge_update_agent.invoke(
+        {
+            "messages": [
                 {
-                    "title": article["title"],
-                    "summary": article["summary"][:300],
+                    "role": "user",
+                    "content": (
+                        "User Query: " + all_time_state["updated_query"]
+                        if all_time_state.get("updated_query")
+                        else all_time_state["query"]
+                        + "\n\nExisting articles: \n"
+                        + str(articles)
+                    ),
                 }
-                for article in existing_articles
             ]
-    
-    result = knowledge_update_agent.invoke({
-    "messages": [{"role": "user", "content": 'User Query: ' + all_time_state["query"] + 
-                  '\n\nExisting articles: \n' + str(articles)}]})
-    
-    reasoning = result['structured_response'].reason
+        }
+    )
+
+    if result["structured_response"].should_update:
+        if len(result["structured_response"].new_titles) > 5:
+            result["structured_response"].new_titles = result[
+                "structured_response"
+            ].new_titles[:5]
+        wikipedia_tool(titles=result["structured_response"].new_titles or [])
+        all_time_state["is_knowledge_updated"] = True
+        all_time_state["new_titles"] = result["structured_response"].new_titles
+    else:
+        all_time_state["is_knowledge_updated"] = False
+
+    reasoning = (
+        "Knowledge base updates is "
+        + str(result["structured_response"].should_update)
+        + ". "
+        + result["structured_response"].reason
+    )
 
     return reasoning
 
@@ -219,15 +292,53 @@ def knowledge_base_update_run() -> str:
 def multiple_retrieval_run() -> str:
     global all_time_state
 
-    # For first retrieval
-    _, _, _, documents, _ = retriever.retrieve(query=all_time_state['updated_query'] if all_time_state.get('updated_query') else all_time_state['query'])
-    all_time_state['retrieved_documents'] = documents
+    current_k = 5
+    reasoning = ""
 
-    result = document_retrieve_agent.invoke({
-    "messages": [{"role": "user", "content": 'User Query: ' + all_time_state["updated_query"] if all_time_state.get("updated_query") else all_time_state["query"] + 
-                  '\n\nCurrent Documents: \n' + str(all_time_state['retrieved_documents'])}]})
-    
-    reasoning = result['structured_response'].reason
+    while all_time_state["should_retrieve"]:
+        retrieved_docs = retrieve_tool(
+            query=(
+                all_time_state["updated_query"]
+                if all_time_state.get("updated_query")
+                else all_time_state["query"]
+            ),
+            k=current_k,
+        )
+
+        all_time_state["retrieved_documents"] = retrieved_docs
+
+        result = document_retrieve_agent.invoke(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "User Query: " + all_time_state["updated_query"]
+                            if all_time_state.get("updated_query")
+                            else all_time_state["query"]
+                            + "\n\nCurrent Documents: \n"
+                            + str(all_time_state["retrieved_documents"])
+                        ),
+                    }
+                ]
+            }
+        )
+
+        all_time_state["should_retrieve"] = result["structured_response"].should_retrieve
+
+        if current_k == 5:
+            reasoning = (
+                "Multiple retrieval is "
+                + str(result["structured_response"].should_retrieve)
+                + ". "
+                + result["structured_response"].reason
+            )
+            
+        if result["structured_response"].should_retrieve is False or current_k == 30:
+            all_time_state["final_k"] = current_k
+            break
+
+        current_k += 5
 
     return reasoning
 
@@ -235,6 +346,7 @@ def multiple_retrieval_run() -> str:
 # --------------------------------------------------------
 # Generator Run Function
 # --------------------------------------------------------
+
 
 def generator_run():
     def generation():
@@ -257,12 +369,21 @@ def generator_run():
 
         final_text = response["messages"][-1].content
 
-        history = []
+        chat_history = []
         for message in response["messages"]:
-            role = message.type.upper() 
-            history.append((role, message.content))
-        
-        all_time_state['chat_history'] = history
+            role = message.type.upper()
+            content = message.content
+            if role == "HUMAN":
+                if "User Query:" in content:
+                    query_text = content.split("User Query:")[1].split(
+                        "Retrieved Documents:"
+                    )[0]
+                    query_text = query_text.strip()
+                    chat_history.append(("HUMAN", query_text))
+            elif role == "AI":
+                chat_history.append(("AI", message.content))
+
+        all_time_state["chat_history"] = chat_history
 
         for line in final_text.splitlines():
             yield line + "\n"

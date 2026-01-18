@@ -46,7 +46,7 @@ def stream_response(url, payload=None):
 # App UI
 # -----------------------------
 st.title("Wikipedia Chatbot")
-st.caption("Wikipedia-powered RAG with multi-agent reasoning")
+st.caption("This chatbot uses Gemini Models as its core LLMs, and Wikipedia articles as its knowledge base.")
 
 # -----------------------------
 # Greeting (once)
@@ -94,14 +94,15 @@ if prompt := st.chat_input("Ask something about Wikipedia..."):
         for chunk in stream_response(f"{BASE_URL}/agent2"):
             st.write(chunk)
             response = requests.get(f"{BASE_URL}/state").json()
-            st.write(f"Knowledge Base Updated: {response.get('is_knowledge_updated', '')}")
+            if response.get("is_knowledge_updated", True):
+                st.write(f"New articles: {response.get('new_titles', '')}")
 
         # Agent 3
-        st.markdown("###### 📚 Agent 3 — Reasoning")
+        st.markdown("###### 📚 Agent 3 — Multiple Retrieval")
         for chunk in stream_response(f"{BASE_URL}/agent3"):
             st.write(chunk)
             response = requests.get(f"{BASE_URL}/state").json()
-            st.write(f"Final k: {response.get('k', '')}")
+            st.write(f"Final k: {response.get('final_k', '')}")
 
         # Final answer
         st.markdown("###### ✅ Final Answer")
