@@ -14,7 +14,7 @@ This project implements an agentic RAG pipeline using LangChain and LangGraph, w
 ## 🏗️ Architecture
 
 ### Workflow
-![Agentic RAG Workflow](images/Agentic%20RAG.png)
+![Agentic RAG Workflow](images/Workflow.png)
 
 ### Backend Components
 
